@@ -31,6 +31,18 @@
     <None Update="Lockbox Test Payment Try 2.txt">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+    <None Update="Lockbox Test Payment Try 4.txt">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Lockbox Test Payment Try 3a.txt">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="LAZZORUSD-ACHWIRES-Recycled-5-15-26-1.txt">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="LAZZORUSD-ACHWIRES-Recycled-5-15-26-2 1.txt">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

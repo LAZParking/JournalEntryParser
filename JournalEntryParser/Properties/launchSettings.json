@@ -1,6 +1,6 @@
 {
   "profiles": {
-    "JournalEntryParcer": {
+    "JournalEntryParser": {
       "commandName": "Project",
       "commandLineArgs": "--port 7204",
       "launchBrowser": false

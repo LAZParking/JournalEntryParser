@@ -1,7 +1,7 @@
-using JournalEntryParcer.Models;
+using JournalEntryParser.Models;
 using System.Globalization;
 
-namespace JournalEntryParcer.Services
+namespace JournalEntryParser.Services
 {
     public class LockboxFileParser
     {

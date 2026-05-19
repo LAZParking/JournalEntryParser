@@ -1,11 +1,11 @@
-using JournalEntryParcer.Services;
+using JournalEntryParser.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using System.Text;
 
-namespace JournalEntryParcer;
+namespace JournalEntryParser;
 
 public class Function1
 {
@@ -28,7 +28,9 @@ public class Function1
         if (req.Method == HttpMethods.Get)
         {
             var baseDir = AppContext.BaseDirectory;
-            var samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 2.txt");
+            var samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 4.txt");
+            if (!File.Exists(samplePath))
+                samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 3a.txt");
             if (!File.Exists(samplePath))
                 samplePath = Path.Combine(baseDir, "AA0A15_Zuora_Lockbox_all_data_elements.txt");
             if (!File.Exists(samplePath))

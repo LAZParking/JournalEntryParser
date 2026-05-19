@@ -1,9 +1,9 @@
-using JournalEntryParcer.Models;
+using JournalEntryParser.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using RestSharp;
 
-namespace JournalEntryParcer.Services
+namespace JournalEntryParser.Services
 {
     public class ZuoraPaymentService
     {
@@ -93,6 +93,70 @@ namespace JournalEntryParcer.Services
                 throw new Exception($"Apply payment returned success=false: {response.Content}");
 
             _logger.LogInformation("Applied {Count} invoice(s) to payment {PaymentId}", invoices.Count, paymentId);
+        }
+
+        public async Task<string> GetAccountIdAsync(string accountNumber)
+        {
+            var token = await _tokenService.GetTokenAsync();
+
+            var client = new RestClient(_baseUrl);
+            var request = new RestRequest($"/v1/accounts/{accountNumber}");
+            request.AddHeader("Authorization", $"Bearer {token}");
+
+            var response = await client.ExecuteAsync(request);
+            _logger.LogInformation("Get account response ({StatusCode}): {Body}", response.StatusCode, response.Content);
+
+            if (!response.IsSuccessful)
+                throw new Exception($"Get account failed ({response.StatusCode}): {response.Content}");
+
+            var json = System.Text.Json.JsonDocument.Parse(response.Content!);
+            return json.RootElement
+                .GetProperty("basicInfo")
+                .GetProperty("id")
+                .GetString()
+                ?? throw new Exception($"Account ID not found in response for {accountNumber}");
+        }
+
+        public async Task<string> FindPaymentNumberAsync(string accountId, string allocationId, string paymentReference)
+        {
+            var token = await _tokenService.GetTokenAsync();
+
+            var client = new RestClient(_baseUrl);
+            var request = new RestRequest("/v1/payments");
+            request.AddHeader("Authorization", $"Bearer {token}");
+            request.AddQueryParameter("accountId", accountId);
+
+            var response = await client.ExecuteAsync(request);
+            _logger.LogInformation("List payments response ({StatusCode}): {Body}", response.StatusCode, response.Content);
+
+            if (!response.IsSuccessful)
+                throw new Exception($"List payments failed ({response.StatusCode}): {response.Content}");
+
+            var json = System.Text.Json.JsonDocument.Parse(response.Content!);
+            var root = json.RootElement;
+
+            System.Text.Json.JsonElement paymentsArray;
+            if (root.TryGetProperty("data", out paymentsArray)) { }
+            else if (root.TryGetProperty("payments", out paymentsArray)) { }
+            else
+                throw new Exception($"Unexpected List Payments response structure — no 'data' or 'payments' key found. Response: {response.Content}");
+
+            foreach (var payment in paymentsArray.EnumerateArray())
+            {
+                var blRef = payment.TryGetProperty("BLPaymentRef__c", out var blProp) ? blProp.GetString() : null;
+                var refId = payment.TryGetProperty("referenceId", out var refProp) ? refProp.GetString() : null;
+
+                if (blRef == allocationId && refId == paymentReference)
+                {
+                    if (!payment.TryGetProperty("number", out var numProp))
+                        throw new Exception($"Matched payment has no 'number' field. Payment: {payment}");
+
+                    return numProp.GetString()
+                        ?? throw new Exception("Matched payment number was null.");
+                }
+            }
+
+            throw new Exception($"No payment found with BLPaymentRef__c={allocationId} and referenceId={paymentReference} for account {accountId}. Response: {response.Content}");
         }
 
         private static (string bankPaymentType, string bankLast4, string lockBoxId) ParsePaymentType(string? paymentType)

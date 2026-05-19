@@ -1,7 +1,7 @@
-using JournalEntryParcer.Models;
+using JournalEntryParser.Models;
 using System.Text;
 
-namespace JournalEntryParcer.Services
+namespace JournalEntryParser.Services
 {
     public class CsvGenerator
     {

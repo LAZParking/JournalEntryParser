@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using RestSharp;
 
-namespace JournalEntryParcer.Services
+namespace JournalEntryParser.Services
 {
     public class ZuoraTokenService
     {

@@ -1,4 +1,4 @@
-using JournalEntryParcer.Services;
+using JournalEntryParser.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Builder;
