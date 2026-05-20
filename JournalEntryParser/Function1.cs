@@ -28,7 +28,7 @@ public class Function1
         if (req.Method == HttpMethods.Get)
         {
             var baseDir = AppContext.BaseDirectory;
-            var samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 4.txt");
+            var samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 4a.txt");
             if (!File.Exists(samplePath))
                 samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 3a.txt");
             if (!File.Exists(samplePath))

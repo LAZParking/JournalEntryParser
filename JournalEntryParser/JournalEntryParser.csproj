@@ -31,6 +31,9 @@
     <None Update="Lockbox Test Payment Try 2.txt">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+    <None Update="Lockbox Test Payment Try 4a.txt">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Update="Lockbox Test Payment Try 4.txt">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>

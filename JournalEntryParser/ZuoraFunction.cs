@@ -40,7 +40,7 @@ public class ZuoraFunction
             }
             else
             {
-                samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 4.txt");
+                samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 4a.txt");
                 if (!File.Exists(samplePath))
                     samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 3a.txt");
                 if (!File.Exists(samplePath))
