@@ -18,7 +18,7 @@ namespace JournalEntryParser.Services
             _logger = logger;
         }
 
-        public async Task<string> CreatePaymentAsync(PaymentHeader paymentHeader, CustomerAccountHeader cah)
+        public async Task<(string Id, string Number)> CreatePaymentAsync(PaymentHeader paymentHeader, CustomerAccountHeader cah)
         {
             var token = await _tokenService.GetTokenAsync();
             var (bankPaymentType, bankLast4, lockBoxId) = ParsePaymentType(cah.paymentType);
@@ -52,21 +52,28 @@ namespace JournalEntryParser.Services
                 throw new Exception($"Create payment failed ({response.StatusCode}): {response.Content}");
 
             var json = System.Text.Json.JsonDocument.Parse(response.Content!);
+
             if (!json.RootElement.TryGetProperty("id", out var idElement))
                 throw new Exception($"Zuora response did not include a payment ID. Response: {response.Content}");
 
-            return idElement.GetString()
+            var id = idElement.GetString()
                 ?? throw new Exception("Zuora payment ID was null.");
+
+            var number = json.RootElement.TryGetProperty("number", out var numElement)
+                ? numElement.GetString() ?? ""
+                : "";
+
+            return (id, number);
         }
 
-        public async Task ApplyPaymentAsync(string paymentId, List<Transaction> transactions)
+        public async Task ApplyPaymentAsync(string paymentId, DateTime? postingDate, List<Transaction> transactions)
         {
             if (transactions.Count == 0) return;
 
             var token = await _tokenService.GetTokenAsync();
 
-            var effectiveDate = transactions.First().invoiceDate
-                ?? throw new Exception("Transaction invoiceDate is null; cannot apply payment.");
+            var effectiveDate = postingDate
+                ?? throw new Exception("CustomerAccountHeader postingDate is null; cannot apply payment.");
 
             var invoices = transactions
                 .Select(t => new { invoiceNumber = t.invoiceNumber, amount = t.amountToAllocate })
@@ -145,6 +152,7 @@ namespace JournalEntryParser.Services
             {
                 var blRef = payment.TryGetProperty("BLPaymentRef__c", out var blProp) ? blProp.GetString() : null;
                 var refId = payment.TryGetProperty("referenceId", out var refProp) ? refProp.GetString() : null;
+                //status = processed
 
                 if (blRef == allocationId && refId == paymentReference)
                 {

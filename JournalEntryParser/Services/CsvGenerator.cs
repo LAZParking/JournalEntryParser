@@ -5,6 +5,14 @@ namespace JournalEntryParser.Services
 {
     public class CsvGenerator
     {
+        private static readonly string[] EnrichedHeaders = new[]
+        {
+            "PaymentDate", "BankLast4", "LockBoxID", "Name", "AccountNumber",
+            "InvoiceNumber", "AppliedAmount", "PaymentAmount", "ReferenceID", "BankPaymentType",
+            "BlacklinePaymentReference", "Comments", "PaymentType",
+            "PaymentNumber", "PaymentUUID", "PassFail"
+        };
+
         private static readonly string[] Headers = new[]
         {
             "PaymentDate", "BankLast4", "LockBoxID", "Name", "AccountNumber",
@@ -97,6 +105,37 @@ namespace JournalEntryParser.Services
                 Escape(name),         // Comments - same as Name
                 "EXTERNAL"            // PaymentType - hardcoded
             });
+        }
+
+        public string GenerateFromResults(IReadOnlyList<PaymentRowResult> rows)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine(string.Join(",", EnrichedHeaders));
+
+            foreach (var row in rows)
+            {
+                sb.AppendLine(string.Join(",", new[]
+                {
+                    Escape(row.PaymentDate),
+                    Escape(row.BankLast4),
+                    Escape(row.LockBoxId),
+                    Escape(row.Name),
+                    Escape(row.AccountNumber),
+                    Escape(row.InvoiceNumber),
+                    Escape(row.AppliedAmount),
+                    Escape(row.PaymentAmount),
+                    Escape(row.ReferenceId),
+                    Escape(row.BankPaymentType),
+                    Escape(row.BlPaymentRef),
+                    Escape(row.Comments),
+                    "EXTERNAL",
+                    Escape(row.PaymentNumber ?? ""),
+                    Escape(row.PaymentUUID ?? ""),
+                    Escape(row.PassFail)
+                }));
+            }
+
+            return sb.ToString();
         }
 
         private string Escape(string value)

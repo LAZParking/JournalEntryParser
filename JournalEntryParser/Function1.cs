@@ -27,19 +27,16 @@ public class Function1
 
         if (req.Method == HttpMethods.Get)
         {
-            var baseDir = AppContext.BaseDirectory;
-            var samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 4a.txt");
+            var fileName = req.Query["file"].ToString();
+            if (string.IsNullOrWhiteSpace(fileName))
+                return new BadRequestObjectResult("Provide a ?file=filename.txt query parameter.");
+
+            var samplePath = Path.Combine(AppContext.BaseDirectory, fileName);
             if (!File.Exists(samplePath))
-                samplePath = Path.Combine(baseDir, "Lockbox Test Payment Try 3a.txt");
-            if (!File.Exists(samplePath))
-                samplePath = Path.Combine(baseDir, "AA0A15_Zuora_Lockbox_all_data_elements.txt");
-            if (!File.Exists(samplePath))
-                samplePath = Path.Combine(baseDir, "AA0A13_Consolidated_Zuora.txt");
-            if (!File.Exists(samplePath))
-                return new NotFoundObjectResult($"No sample file found in {baseDir}");
+                return new NotFoundObjectResult($"File '{fileName}' not found in {AppContext.BaseDirectory}");
 
             content = await File.ReadAllTextAsync(samplePath);
-            _logger.LogInformation("Processing sample lockbox file: {File}", Path.GetFileName(samplePath));
+            _logger.LogInformation("Processing sample lockbox file: {File}", fileName);
         }
         else
         {

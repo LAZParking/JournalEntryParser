@@ -24,6 +24,7 @@ namespace JournalEntryParser.Services
                         file.header = ParseHeader(fields);
                         break;
                     case "P":
+                    case "O":
                         currentPayment = new Payment { paymentHeader = ParsePaymentHeader(fields) };
                         currentCustomerAccount = null;
                         file.payments.Add(currentPayment);
