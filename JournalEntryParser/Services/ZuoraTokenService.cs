@@ -5,7 +5,7 @@ namespace JournalEntryParser.Services
 {
     public class ZuoraTokenService
     {
-        private readonly string _tokenUrl;
+        private readonly RestClient _client;
         private readonly string _clientId;
         private readonly string _clientSecret;
 
@@ -13,10 +13,9 @@ namespace JournalEntryParser.Services
         private DateTime _tokenExpiry = DateTime.MinValue;
         private readonly SemaphoreSlim _lock = new(1, 1);
 
-        public ZuoraTokenService(IConfiguration config)
+        public ZuoraTokenService(RestClient client, IConfiguration config)
         {
-            var baseUrl = config["Zuora:BaseUrl"]!;
-            _tokenUrl = $"{baseUrl}/oauth/token";
+            _client = client;
             _clientId = config["Zuora:ClientId"]!;
             _clientSecret = config["Zuora:ClientSecret"]!;
         }
@@ -32,13 +31,12 @@ namespace JournalEntryParser.Services
                 if (_cachedToken != null && DateTime.UtcNow < _tokenExpiry)
                     return _cachedToken;
 
-                var client = new RestClient(_tokenUrl);
-                var request = new RestRequest();
+                var request = new RestRequest("oauth/token", Method.Post);
                 request.AddParameter("client_id", _clientId);
                 request.AddParameter("client_secret", _clientSecret);
                 request.AddParameter("grant_type", "client_credentials");
 
-                var response = await client.PostAsync<TokenResponse>(request)
+                var response = await _client.PostAsync<TokenResponse>(request)
                     ?? throw new Exception("Empty response from Zuora token endpoint.");
 
                 _cachedToken = response.AccessToken;
