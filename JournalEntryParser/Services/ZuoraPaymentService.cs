@@ -74,8 +74,25 @@ namespace JournalEntryParser.Services
 
             var token = await _tokenService.GetTokenAsync();
 
-            var effectiveDate = postingDate
+            var postingEffectiveDate = postingDate
                 ?? throw new Exception("CustomerAccountHeader postingDate is null; cannot apply payment.");
+
+            // Zuora rejects applying a payment whose effective date is earlier than an invoice
+            // it's applied to. The T-line invoice date (4th column) can be later than the
+            // C-record posting date, so when any transaction's invoice date is ahead, apply
+            // using the latest invoice date across this account's transactions.
+            var maxInvoiceDate = transactions
+                .Where(t => t.invoiceDate.HasValue)
+                .Select(t => t.invoiceDate!.Value)
+                .DefaultIfEmpty(postingEffectiveDate)
+                .Max();
+
+            var effectiveDate = maxInvoiceDate > postingEffectiveDate ? maxInvoiceDate : postingEffectiveDate;
+
+            if (effectiveDate != postingEffectiveDate)
+                _logger.LogInformation(
+                    "Apply effectiveDate bumped from posting date {PostingDate:yyyy-MM-dd} to latest invoice date {InvoiceDate:yyyy-MM-dd} for payment {PaymentId}",
+                    postingEffectiveDate, effectiveDate, paymentId);
 
             // Debit memo numbers arrive in the same T-line field as invoice numbers;
             // the documentType field is unreliable (says "INV" for debit memos), so
