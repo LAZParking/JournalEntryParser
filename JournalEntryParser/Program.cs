@@ -15,9 +15,10 @@ builder.Services
     .AddSingleton<LockboxFileParser>()
     .AddSingleton<CsvGenerator>()
     .AddSingleton<ErrorLogService>()
-    .AddSingleton<SftpService>()
     .AddSingleton<BlobStorageService>()
     .AddSingleton<ZuoraTokenService>()
-    .AddSingleton<ZuoraPaymentService>();
+    .AddSingleton<ZuoraPaymentService>()
+    .AddSingleton<BcTokenService>()
+    .AddSingleton<BcPaymentService>();
 
 builder.Build().Run();

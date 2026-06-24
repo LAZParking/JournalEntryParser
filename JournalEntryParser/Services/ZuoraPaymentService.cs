@@ -27,14 +27,14 @@ namespace JournalEntryParser.Services
             {
                 ["accountNumber"]      = cah.accountNumber,
                 ["amount"]             = cah.creditValue,
-                ["currency"]           = paymentHeader.currency ?? "USD",
+                ["currency"]           = "USD",
                 ["effectiveDate"]      = cah.postingDate?.ToString("yyyy-MM-dd"),
                 ["type"]               = "External",
                 ["paymentMethodType"]  = "Check",
                 ["referenceId"]        = cah.paymentReference,
                 ["comment"]            = cah.paymentName,
                 ["BankPaymentType__c"] = bankPaymentType,
-                ["BankNumber__c"]      = bankLast4,
+                ["BankLast4__c"]      = bankLast4,
                 ["LockBoxID__c"]       = lockBoxId,
                 ["BLPaymentRef__c"]    = cah.allocationID?.ToString()
             };
@@ -75,18 +75,30 @@ namespace JournalEntryParser.Services
             var effectiveDate = postingDate
                 ?? throw new Exception("CustomerAccountHeader postingDate is null; cannot apply payment.");
 
+            // Debit memo numbers arrive in the same T-line field as invoice numbers;
+            // the documentType field is unreliable (says "INV" for debit memos), so
+            // the DM number prefix is the discriminator.
             var invoices = transactions
-                .Select(t => new { invoiceNumber = t.invoiceNumber, amount = t.amountToAllocate })
+                .Where(t => !IsDebitMemo(t.invoiceNumber))
+                .Select(t => (object)new { invoiceNumber = t.invoiceNumber, amount = t.amountToAllocate })
                 .ToList();
+
+            var debitMemos = transactions
+                .Where(t => IsDebitMemo(t.invoiceNumber))
+                .Select(t => (object)new { debitMemoNumber = t.invoiceNumber, amount = t.amountToAllocate })
+                .ToList();
+
+            var body = new Dictionary<string, object?>
+            {
+                ["effectiveDate"] = effectiveDate.ToString("yyyy-MM-dd")
+            };
+            if (invoices.Count > 0) body["invoices"] = invoices;
+            if (debitMemos.Count > 0) body["debitMemos"] = debitMemos;
 
             var client = new RestClient(_baseUrl);
             var request = new RestRequest($"/v1/payments/{paymentId}/apply", Method.Put);
             request.AddHeader("Authorization", $"Bearer {token}");
-            request.AddJsonBody(new
-            {
-                effectiveDate = effectiveDate.ToString("yyyy-MM-dd"),
-                invoices
-            });
+            request.AddJsonBody(body);
 
             var response = await client.ExecuteAsync(request);
 
@@ -99,8 +111,12 @@ namespace JournalEntryParser.Services
             if (applyJson.RootElement.TryGetProperty("success", out var successProp) && !successProp.GetBoolean())
                 throw new Exception($"Apply payment returned success=false: {response.Content}");
 
-            _logger.LogInformation("Applied {Count} invoice(s) to payment {PaymentId}", invoices.Count, paymentId);
+            _logger.LogInformation("Applied {InvoiceCount} invoice(s) and {DebitMemoCount} debit memo(s) to payment {PaymentId}",
+                invoices.Count, debitMemos.Count, paymentId);
         }
+
+        private static bool IsDebitMemo(string? documentNumber) =>
+            documentNumber?.StartsWith("DM", StringComparison.OrdinalIgnoreCase) == true;
 
         public async Task<string> GetAccountIdAsync(string accountNumber)
         {

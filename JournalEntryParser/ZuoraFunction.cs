@@ -3,7 +3,6 @@ using JournalEntryParser.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System.Text;
 
@@ -16,9 +15,7 @@ public class ZuoraFunction
     private readonly ZuoraPaymentService _zuoraPaymentService;
     private readonly CsvGenerator _csvGenerator;
     private readonly ErrorLogService _errorLogService;
-    private readonly SftpService _sftpService;
     private readonly BlobStorageService _blobStorageService;
-    private readonly string _sftpRemotePath;
 
     public ZuoraFunction(
         ILogger<ZuoraFunction> logger,
@@ -26,97 +23,81 @@ public class ZuoraFunction
         ZuoraPaymentService zuoraPaymentService,
         CsvGenerator csvGenerator,
         ErrorLogService errorLogService,
-        SftpService sftpService,
-        BlobStorageService blobStorageService,
-        IConfiguration config)
+        BlobStorageService blobStorageService)
     {
         _logger = logger;
         _parser = parser;
         _zuoraPaymentService = zuoraPaymentService;
         _csvGenerator = csvGenerator;
         _errorLogService = errorLogService;
-        _sftpService = sftpService;
         _blobStorageService = blobStorageService;
-        _sftpRemotePath = config["Sftp:RemotePath"] ?? "/outbound/lockbox/";
     }
 
     [Function("ProcessZuoraPayments")]
     public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Function, "get", "post")] HttpRequest req)
     {
+        var fileName = req.Query["file"].ToString();
+        if (string.IsNullOrWhiteSpace(fileName))
+            return new BadRequestObjectResult("Provide a ?file=<blob name> query parameter.");
+
         var isRecycled = string.Equals(req.Query["isRecycled"], "true", StringComparison.OrdinalIgnoreCase);
 
-        // SFTP mode: download files from SFTP, process each, upload results to Blob Storage
-        if (_sftpService.IsConfigured)
-            return await RunSftpModeAsync(isRecycled);
+        // Optional ?local=true (defaults to false) forces disk mode even when blob
+        // storage is configured: the file is read from the repo root or build output,
+        // and the CSV + error log are written to the repo root.
+        var useLocal = string.Equals(req.Query["local"], "true", StringComparison.OrdinalIgnoreCase);
 
-        // Local test mode: read a single file specified via ?file= query param
-        string content;
+        // Production path: read the named file from the Blob input folder, process,
+        // and write the CSV + error log to the Blob output folder.
+        if (_blobStorageService.IsConfigured && !useLocal)
+            return await RunBlobModeAsync(fileName, isRecycled);
 
-        if (req.Method == HttpMethods.Get)
+        // Local test mode: read the file from the repo root, falling back to the build output folder.
+        var candidatePaths = new[]
         {
-            var fileName = req.Query["file"].ToString();
-            if (string.IsNullOrWhiteSpace(fileName))
-                return new BadRequestObjectResult("Provide a ?file=filename.txt query parameter.");
+            Path.Combine(FindGitRoot(), fileName),
+            Path.Combine(AppContext.BaseDirectory, fileName)
+        };
+        var samplePath = candidatePaths.FirstOrDefault(File.Exists);
+        if (samplePath == null)
+            return new NotFoundObjectResult($"File '{fileName}' was not found in {FindGitRoot()} or {AppContext.BaseDirectory}");
 
-            var samplePath = Path.Combine(AppContext.BaseDirectory, fileName);
-            if (!File.Exists(samplePath))
-                return new NotFoundObjectResult($"File '{fileName}' not found in {AppContext.BaseDirectory}");
+        var localContent = await File.ReadAllTextAsync(samplePath);
+        var localRunTime = DateTime.UtcNow;
+        var localRows = await ProcessContentAsync(localContent, isRecycled);
+        return await WriteLocalOutputAsync(localRows, localRunTime);
+    }
 
-            content = await File.ReadAllTextAsync(samplePath);
-            _logger.LogInformation("Processing sample file: {File}", fileName);
-        }
-        else
-        {
-            using var reader = new StreamReader(req.Body, Encoding.UTF8);
-            content = await reader.ReadToEndAsync();
-            if (string.IsNullOrWhiteSpace(content))
-                return new BadRequestObjectResult("Request body is empty.");
-        }
+    private async Task<IActionResult> RunBlobModeAsync(string fileName, bool isRecycled)
+    {
+        _logger.LogInformation("Processing blob input file: {File} (isRecycled={IsRecycled})", fileName, isRecycled);
+
+        var content = await _blobStorageService.DownloadInputTextAsync(fileName);
 
         var runTime = DateTime.UtcNow;
         var rows = await ProcessContentAsync(content, isRecycled);
-        return await WriteLocalOutputAsync(rows, runTime);
-    }
 
-    private async Task<IActionResult> RunSftpModeAsync(bool isRecycled)
-    {
-        var remoteFiles = await _sftpService.ListFilesAsync(_sftpRemotePath);
-        _logger.LogInformation("SFTP mode: found {Count} file(s) at {Path}", remoteFiles.Count, _sftpRemotePath);
+        var runStamp = runTime.ToString("yyyyMMdd_HHmmss");
+        var baseName = Path.GetFileNameWithoutExtension(fileName);
 
-        var allRows = new List<PaymentRowResult>();
+        var csv = _csvGenerator.GenerateFromResults(rows);
+        await _blobStorageService.UploadOutputTextAsync(csv, $"{baseName}_{runStamp}.csv");
 
-        foreach (var remoteFile in remoteFiles)
+        var errorLog = _errorLogService.Generate(rows, runTime);
+        await _blobStorageService.UploadOutputTextAsync(errorLog, $"{baseName}_{runStamp}_errors.txt");
+
+        var failures = rows.Count(r => !r.Success);
+        _logger.LogInformation("Wrote output for {File}: {Rows} rows, {Failures} failures", fileName, rows.Count, failures);
+
+        return new OkObjectResult(new
         {
-            var tempPath = await _sftpService.DownloadToTempAsync(remoteFile);
-            try
-            {
-                var content = await File.ReadAllTextAsync(tempPath);
-                _logger.LogInformation("Processing SFTP file: {File}", Path.GetFileName(remoteFile));
-
-                var runTime = DateTime.UtcNow;
-                var rows = await ProcessContentAsync(content, isRecycled);
-                allRows.AddRange(rows);
-
-                var runStamp = runTime.ToString("yyyyMMdd_HHmmss");
-                var baseName = Path.GetFileNameWithoutExtension(remoteFile);
-
-                var csv = _csvGenerator.GenerateFromResults(rows);
-                await _blobStorageService.UploadTextAsync(csv, _blobStorageService.OutputContainer, $"{baseName}_{runStamp}.csv");
-
-                var errorLog = _errorLogService.Generate(rows, runTime);
-                await _blobStorageService.UploadTextAsync(errorLog, _blobStorageService.OutputContainer, $"{baseName}_{runStamp}_errors.txt");
-
-                await _blobStorageService.UploadFileAsync(tempPath, _blobStorageService.ArchiveContainer, $"{baseName}_{runStamp}{Path.GetExtension(remoteFile)}");
-
-                _logger.LogInformation("Uploaded output and archived {File} to Blob Storage", Path.GetFileName(remoteFile));
-            }
-            finally
-            {
-                if (File.Exists(tempPath)) File.Delete(tempPath);
-            }
-        }
-
-        return new OkObjectResult(new { filesProcessed = remoteFiles.Count, totalRows = allRows.Count });
+            file = fileName,
+            isRecycled,
+            totalRows = rows.Count,
+            failures,
+            csvBlob = $"{baseName}_{runStamp}.csv",
+            errorBlob = $"{baseName}_{runStamp}_errors.txt"
+        });
     }
 
     private async Task<IActionResult> WriteLocalOutputAsync(List<PaymentRowResult> rows, DateTime runTime)
