@@ -3,6 +3,7 @@ using JournalEntryParser.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System.Text;
 
@@ -16,6 +17,7 @@ public class ZuoraFunction
     private readonly CsvGenerator _csvGenerator;
     private readonly ErrorLogService _errorLogService;
     private readonly BlobStorageService _blobStorageService;
+    private readonly IConfiguration _config;
 
     public ZuoraFunction(
         ILogger<ZuoraFunction> logger,
@@ -23,7 +25,8 @@ public class ZuoraFunction
         ZuoraPaymentService zuoraPaymentService,
         CsvGenerator csvGenerator,
         ErrorLogService errorLogService,
-        BlobStorageService blobStorageService)
+        BlobStorageService blobStorageService,
+        IConfiguration config)
     {
         _logger = logger;
         _parser = parser;
@@ -31,6 +34,7 @@ public class ZuoraFunction
         _csvGenerator = csvGenerator;
         _errorLogService = errorLogService;
         _blobStorageService = blobStorageService;
+        _config = config;
     }
 
     [Function("ProcessZuoraPayments")]
@@ -125,30 +129,50 @@ public class ZuoraFunction
     private async Task<List<PaymentRowResult>> ProcessContentAsync(string content, bool isRecycled)
     {
         var lockboxFile = _parser.Parse(content);
-        var rows = new List<PaymentRowResult>();
 
-        foreach (var payment in lockboxFile.payments)
+        // Flatten every account into an ordered work list.
+        var work = lockboxFile.payments
+            .SelectMany(p => p.customerAccounts.Select(account => (payment: p, account)))
+            .ToList();
+
+        // Bounded parallelism. Each account makes up to 2 sequential Zuora calls, so N concurrent
+        // accounts ≈ N concurrent calls — keep N well under Zuora's 40-concurrent limit.
+        var maxConcurrency = int.TryParse(_config["Zuora:MaxConcurrency"], out var c) && c > 0 ? c : 20;
+        using var gate = new SemaphoreSlim(maxConcurrency);
+
+        // Results kept per-account by index so the CSV stays in original file order.
+        var perAccount = new List<PaymentRowResult>[work.Count];
+
+        var tasks = work.Select(async (item, index) =>
         {
-            foreach (var customerAccount in payment.customerAccounts)
+            await gate.WaitAsync();
+            try
             {
-                var cah = customerAccount.customerAccountHeader;
-
+                var cah = item.account.customerAccountHeader;
+                var rows = new List<PaymentRowResult>();   // local list -> no shared-state race
                 try
                 {
                     if (isRecycled)
-                        await ProcessRecycledPaymentAsync(customerAccount.transactions, cah, rows);
+                        await ProcessRecycledPaymentAsync(item.account.transactions, cah, rows);
                     else
-                        await ProcessNewPaymentAsync(payment, customerAccount, rows);
+                        await ProcessNewPaymentAsync(item.payment, item.account, rows);
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed processing account {Account}", cah?.accountNumber);
                     MarkAccountRowsFailed(rows, cah, ex.Message);
                 }
+                perAccount[index] = rows;
             }
-        }
+            finally
+            {
+                gate.Release();
+            }
+        });
 
-        return rows;
+        await Task.WhenAll(tasks);
+
+        return perAccount.Where(r => r is not null).SelectMany(r => r).ToList();
     }
 
     private async Task ProcessNewPaymentAsync(Payment payment, CustomerAccount customerAccount, List<PaymentRowResult> rows)

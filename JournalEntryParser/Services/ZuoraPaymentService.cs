@@ -1,5 +1,4 @@
 using JournalEntryParser.Models;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using RestSharp;
 
@@ -8,13 +7,13 @@ namespace JournalEntryParser.Services
     public class ZuoraPaymentService
     {
         private readonly ZuoraTokenService _tokenService;
-        private readonly string _baseUrl;
+        private readonly RestClient _client;
         private readonly ILogger<ZuoraPaymentService> _logger;
 
-        public ZuoraPaymentService(ZuoraTokenService tokenService, IConfiguration config, ILogger<ZuoraPaymentService> logger)
+        public ZuoraPaymentService(ZuoraTokenService tokenService, RestClient client, ILogger<ZuoraPaymentService> logger)
         {
             _tokenService = tokenService;
-            _baseUrl = config["Zuora:BaseUrl"]!;
+            _client = client;
             _logger = logger;
         }
 
@@ -39,12 +38,15 @@ namespace JournalEntryParser.Services
                 ["BLPaymentRef__c"]    = cah.allocationID?.ToString()
             };
 
-            var client = new RestClient(_baseUrl);
             var request = new RestRequest("/v1/payments", Method.Post);
             request.AddHeader("Authorization", $"Bearer {token}");
+            // Deterministic idempotency key from the payment's natural key: a retry — or a
+            // re-run of the whole file after a partial failure — reuses the same key, so Zuora
+            // returns the original payment instead of creating a duplicate.
+            request.AddHeader("Idempotency-Key", BuildCreateIdempotencyKey(cah));
             request.AddJsonBody(body);
 
-            var response = await client.ExecuteAsync(request);
+            var response = await _client.ExecuteAsync(request);
 
             _logger.LogInformation("Create payment response ({StatusCode}): {Body}", response.StatusCode, response.Content);
 
@@ -72,8 +74,25 @@ namespace JournalEntryParser.Services
 
             var token = await _tokenService.GetTokenAsync();
 
-            var effectiveDate = postingDate
+            var postingEffectiveDate = postingDate
                 ?? throw new Exception("CustomerAccountHeader postingDate is null; cannot apply payment.");
+
+            // Zuora rejects applying a payment whose effective date is earlier than an invoice
+            // it's applied to. The T-line invoice date (4th column) can be later than the
+            // C-record posting date, so when any transaction's invoice date is ahead, apply
+            // using the latest invoice date across this account's transactions.
+            var maxInvoiceDate = transactions
+                .Where(t => t.invoiceDate.HasValue)
+                .Select(t => t.invoiceDate!.Value)
+                .DefaultIfEmpty(postingEffectiveDate)
+                .Max();
+
+            var effectiveDate = maxInvoiceDate > postingEffectiveDate ? maxInvoiceDate : postingEffectiveDate;
+
+            if (effectiveDate != postingEffectiveDate)
+                _logger.LogInformation(
+                    "Apply effectiveDate bumped from posting date {PostingDate:yyyy-MM-dd} to latest invoice date {InvoiceDate:yyyy-MM-dd} for payment {PaymentId}",
+                    postingEffectiveDate, effectiveDate, paymentId);
 
             // Debit memo numbers arrive in the same T-line field as invoice numbers;
             // the documentType field is unreliable (says "INV" for debit memos), so
@@ -95,12 +114,13 @@ namespace JournalEntryParser.Services
             if (invoices.Count > 0) body["invoices"] = invoices;
             if (debitMemos.Count > 0) body["debitMemos"] = debitMemos;
 
-            var client = new RestClient(_baseUrl);
             var request = new RestRequest($"/v1/payments/{paymentId}/apply", Method.Put);
             request.AddHeader("Authorization", $"Bearer {token}");
+            // No Idempotency-Key here: Zuora only honors it on POST/PATCH and documents that PUT
+            // (intrinsically idempotent) must not send one. Re-applying the same payment is safe.
             request.AddJsonBody(body);
 
-            var response = await client.ExecuteAsync(request);
+            var response = await _client.ExecuteAsync(request);
 
             _logger.LogInformation("Apply payment response ({StatusCode}): {Body}", response.StatusCode, response.Content);
 
@@ -122,11 +142,10 @@ namespace JournalEntryParser.Services
         {
             var token = await _tokenService.GetTokenAsync();
 
-            var client = new RestClient(_baseUrl);
             var request = new RestRequest($"/v1/accounts/{accountNumber}");
             request.AddHeader("Authorization", $"Bearer {token}");
 
-            var response = await client.ExecuteAsync(request);
+            var response = await _client.ExecuteAsync(request);
             _logger.LogInformation("Get account response ({StatusCode}): {Body}", response.StatusCode, response.Content);
 
             if (!response.IsSuccessful)
@@ -144,12 +163,11 @@ namespace JournalEntryParser.Services
         {
             var token = await _tokenService.GetTokenAsync();
 
-            var client = new RestClient(_baseUrl);
             var request = new RestRequest("/v1/payments");
             request.AddHeader("Authorization", $"Bearer {token}");
             request.AddQueryParameter("accountId", accountId);
 
-            var response = await client.ExecuteAsync(request);
+            var response = await _client.ExecuteAsync(request);
             _logger.LogInformation("List payments response ({StatusCode}): {Body}", response.StatusCode, response.Content);
 
             if (!response.IsSuccessful)
@@ -192,6 +210,20 @@ namespace JournalEntryParser.Services
                 parts.ElementAtOrDefault(1) ?? "",
                 parts.ElementAtOrDefault(2) ?? ""
             );
+        }
+
+        // Idempotency key for creating a payment, derived from the payment's natural key so the
+        // same logical payment always maps to the same key across retries and file re-runs.
+        private static string BuildCreateIdempotencyKey(CustomerAccountHeader cah) =>
+            DeterministicUuid($"create|{cah.accountNumber}|{cah.allocationID}|{cah.paymentReference}|{cah.creditValue}");
+
+        // Hashes an arbitrary string into a stable UUID-v4-formatted string (Zuora requires v4 form).
+        private static string DeterministicUuid(string input)
+        {
+            var hash = System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(input));
+            hash[6] = (byte)((hash[6] & 0x0F) | 0x40); // version 4
+            hash[8] = (byte)((hash[8] & 0x3F) | 0x80); // RFC 4122 variant
+            return new Guid(hash).ToString();
         }
     }
 }
