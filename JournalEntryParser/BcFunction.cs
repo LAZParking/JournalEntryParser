@@ -55,14 +55,34 @@ public class BcFunction
             content = await File.ReadAllTextAsync(samplePath);
         }
 
-        var bcResponse = await _bcPaymentService.SendFileAsync(content, isRecycled);
+        var result = await _bcPaymentService.SendFileAsync(content, isRecycled);
+
+        if (!result.IsSuccess)
+        {
+            // BC reached but rejected the content (e.g. a blocked dimension value). Echo BC's status +
+            // error body so the ADF activity FAILS and shows the reason in its output, not just a 500.
+            _logger.LogError("BC rejected {File} (isRecycled={IsRecycled}) with {Status}: {Body}",
+                fileName, isRecycled, result.StatusCode, result.Content);
+
+            return new ObjectResult(new
+            {
+                file = fileName,
+                isRecycled,
+                bcStatusCode = result.StatusCode,
+                bcError = result.Content
+            })
+            {
+                StatusCode = result.StatusCode
+            };
+        }
+
         _logger.LogInformation("Sent {File} to BC (isRecycled={IsRecycled})", fileName, isRecycled);
 
         return new OkObjectResult(new
         {
             file = fileName,
             isRecycled,
-            bcResponse
+            bcResponse = result.Content
         });
     }
 

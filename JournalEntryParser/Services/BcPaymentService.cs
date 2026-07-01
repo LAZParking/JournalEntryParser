@@ -30,9 +30,10 @@ namespace JournalEntryParser.Services
         /// {"inputJson":"..."} envelope whose inner JSON is *single*-escaped, so every line break
         /// lands as a raw CRLF inside the content string — the exact shape BC's importer expects.
         /// A plain JsonSerializer would double-escape the envelope and never force CRLF on LF-only
-        /// files, producing a different document. Returns the BC response body.
+        /// files, producing a different document. Returns BC's HTTP status and response body
+        /// (including business/validation rejections) so the caller can surface them to ADF.
         /// </summary>
-        public async Task<string?> SendFileAsync(string fileContent, bool isRecycled)
+        public async Task<BcSendResult> SendFileAsync(string fileContent, bool isRecycled)
         {
             var token = await _tokenService.GetTokenAsync();
             var paymentType = isRecycled ? "Recycled" : "Standard";
@@ -64,10 +65,17 @@ namespace JournalEntryParser.Services
 
             _logger.LogInformation("Send file to BC response ({StatusCode}): {Body}", response.StatusCode, response.Content);
 
-            if (!response.IsSuccessful)
-                throw new Exception($"Send file to BC failed ({response.StatusCode}): {response.Content}");
+            // Transport-level failure (couldn't reach BC / timeout) — genuinely retriable, bubble up as 500.
+            if (response.ResponseStatus != ResponseStatus.Completed)
+                throw new Exception(
+                    $"Could not reach BC ({response.ResponseStatus}): {response.ErrorMessage}", response.ErrorException);
 
-            return response.Content;
+            // Got an HTTP response from BC — success OR a business/validation rejection (e.g. a blocked
+            // dimension value). Return it either way so the caller can surface BC's own error to ADF.
+            return new BcSendResult(response.IsSuccessful, (int)response.StatusCode, response.Content);
         }
     }
+
+    /// <summary>Outcome of a BC import POST: BC's HTTP status code and response body.</summary>
+    public record BcSendResult(bool IsSuccess, int StatusCode, string? Content);
 }
