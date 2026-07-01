@@ -46,7 +46,7 @@ namespace JournalEntryParser.Services
             request.AddHeader("Idempotency-Key", BuildCreateIdempotencyKey(cah));
             request.AddJsonBody(body);
 
-            var response = await _client.ExecuteAsync(request);
+            var response = await ExecuteWithLockRetryAsync(request, "Create payment");
 
             _logger.LogInformation("Create payment response ({StatusCode}): {Body}", response.StatusCode, response.Content);
 
@@ -120,7 +120,7 @@ namespace JournalEntryParser.Services
             // (intrinsically idempotent) must not send one. Re-applying the same payment is safe.
             request.AddJsonBody(body);
 
-            var response = await _client.ExecuteAsync(request);
+            var response = await ExecuteWithLockRetryAsync(request, "Apply payment");
 
             _logger.LogInformation("Apply payment response ({StatusCode}): {Body}", response.StatusCode, response.Content);
 
@@ -210,6 +210,73 @@ namespace JournalEntryParser.Services
                 parts.ElementAtOrDefault(1) ?? "",
                 parts.ElementAtOrDefault(2) ?? ""
             );
+        }
+
+        // Max total attempts for an operation that hits Zuora "locking contention" (category 50).
+        // Per-account serialization upstream stops us from racing ourselves, but a UI user or a
+        // batch job can still touch the same account mid-run. The resilient HttpClient handler does
+        // NOT cover code 50 (Zuora returns it in the body, not as a retriable 429/5xx), so we retry
+        // it explicitly here with the limited exponential backoff Zuora recommends.
+        private const int LockRetryMaxAttempts = 5;
+        private static readonly TimeSpan LockRetryBaseDelay = TimeSpan.FromSeconds(1);
+
+        private async Task<RestResponse> ExecuteWithLockRetryAsync(RestRequest request, string operation)
+        {
+            for (var attempt = 1; ; attempt++)
+            {
+                var response = await _client.ExecuteAsync(request);
+
+                if (attempt >= LockRetryMaxAttempts || !IsLockContention(response))
+                    return response;
+
+                // Exponential backoff (1s, 2s, 4s, 8s) + jitter so the parallel account workers
+                // don't resynchronize their retries onto the same instant.
+                var delay = LockRetryBaseDelay * Math.Pow(2, attempt - 1)
+                            + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 500));
+
+                _logger.LogWarning(
+                    "{Operation} hit Zuora lock contention (attempt {Attempt}/{Max}); retrying in {DelayMs:n0}ms. Response: {Body}",
+                    operation, attempt, LockRetryMaxAttempts, delay.TotalMilliseconds, response.Content);
+
+                await Task.Delay(delay);
+            }
+        }
+
+        // Detects Zuora "locking contention": the objects being modified are held by a competing
+        // API call, UI op, or batch job. Error codes are 8 digits — a 6-digit resource code plus a
+        // 2-digit category — and category 50 is locking contention, so the code ends in "50".
+        // Matching the structured reasons[].code (not raw text) avoids false-matching our own
+        // "LockBoxID__c" field echoed back in the response body.
+        private static bool IsLockContention(RestResponse response)
+        {
+            if (string.IsNullOrEmpty(response.Content)) return false;
+
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(response.Content);
+                if (!doc.RootElement.TryGetProperty("reasons", out var reasons)
+                    || reasons.ValueKind != System.Text.Json.JsonValueKind.Array)
+                    return false;
+
+                foreach (var reason in reasons.EnumerateArray())
+                {
+                    if (!reason.TryGetProperty("code", out var codeProp)) continue;
+
+                    // code is numeric in REST responses, but tolerate a string form just in case.
+                    var code = codeProp.ValueKind == System.Text.Json.JsonValueKind.Number
+                        ? codeProp.GetInt64().ToString()
+                        : codeProp.GetString();
+
+                    if (code is { Length: >= 2 } && code.EndsWith("50"))
+                        return true;
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Non-JSON body (e.g. a gateway HTML error page) — not a recognizable lock error.
+            }
+
+            return false;
         }
 
         // Idempotency key for creating a payment, derived from the payment's natural key so the

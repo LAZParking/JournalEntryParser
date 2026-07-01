@@ -130,9 +130,11 @@ public class ZuoraFunction
     {
         var lockboxFile = _parser.Parse(content);
 
-        // Flatten every account into an ordered work list.
+        // Flatten every account into an ordered work list, tagging each item with its original
+        // position so results can be written back in file order regardless of completion order.
         var work = lockboxFile.payments
             .SelectMany(p => p.customerAccounts.Select(account => (payment: p, account)))
+            .Select((item, index) => (item.payment, item.account, index))
             .ToList();
 
         // Bounded parallelism. Each account makes up to 2 sequential Zuora calls, so N concurrent
@@ -140,29 +142,58 @@ public class ZuoraFunction
         var maxConcurrency = int.TryParse(_config["Zuora:MaxConcurrency"], out var c) && c > 0 ? c : 20;
         using var gate = new SemaphoreSlim(maxConcurrency);
 
-        // Results kept per-account by index so the CSV stays in original file order.
+        // Results kept per-work-item by index so the CSV stays in original file order.
         var perAccount = new List<PaymentRowResult>[work.Count];
 
-        var tasks = work.Select(async (item, index) =>
+        // Zuora locks a customer account while a payment is being created/applied, so two
+        // concurrent calls against the SAME account collide with a "locking contention" error.
+        // Group the work by account number and process each group's items SEQUENTIALLY, while
+        // running different accounts in PARALLEL under the gate. Distinct accounts (101 and 102)
+        // still run together; a repeated account (a second 101) waits its turn instead of racing
+        // the first. Items with no account number can't collide, so each becomes its own group.
+        var groups = work
+            .GroupBy(w => w.account.customerAccountHeader?.accountNumber is { Length: > 0 } acct
+                ? acct
+                : $"__no_account_{w.index}")
+            .ToList();
+
+        // A file dominated by one account is the only remaining timeout risk: its items run
+        // serially, so a very large group drains alone at the run's tail. Surface it for visibility.
+        var fatThreshold = int.TryParse(_config["Zuora:FatAccountWarnThreshold"], out var f) && f > 0 ? f : 25;
+        foreach (var g in groups)
+        {
+            var count = g.Count();
+            if (count > fatThreshold)
+                _logger.LogWarning(
+                    "Account {Account} has {Count} work items in this file; these process sequentially " +
+                    "to avoid Zuora lock contention and may dominate the run's tail latency.",
+                    g.Key, count);
+        }
+
+        var tasks = groups.Select(async group =>
         {
             await gate.WaitAsync();
             try
             {
-                var cah = item.account.customerAccountHeader;
-                var rows = new List<PaymentRowResult>();   // local list -> no shared-state race
-                try
+                // Sequential within one account so we never race ourselves into a Zuora lock.
+                foreach (var item in group)
                 {
-                    if (isRecycled)
-                        await ProcessRecycledPaymentAsync(item.account.transactions, cah, rows);
-                    else
-                        await ProcessNewPaymentAsync(item.payment, item.account, rows);
+                    var cah = item.account.customerAccountHeader;
+                    var rows = new List<PaymentRowResult>();   // local list -> no shared-state race
+                    try
+                    {
+                        if (isRecycled)
+                            await ProcessRecycledPaymentAsync(item.account.transactions, cah, rows);
+                        else
+                            await ProcessNewPaymentAsync(item.payment, item.account, rows);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed processing account {Account}", cah?.accountNumber);
+                        MarkAccountRowsFailed(rows, cah, ex.Message);
+                    }
+                    perAccount[item.index] = rows;
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed processing account {Account}", cah?.accountNumber);
-                    MarkAccountRowsFailed(rows, cah, ex.Message);
-                }
-                perAccount[index] = rows;
             }
             finally
             {
